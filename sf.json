@@ -1,0 +1,71 @@
+{
+  "Comment": "Export 12 months from BigQuery to S3",
+  "StartAt": "ForEachMonth",
+  "States": {
+    "ForEachMonth": {
+      "Type": "Map",
+      "ItemsPath": "$.months",
+      "MaxConcurrency": 4,
+      "Parameters": {
+        "InstanceIds.$": "$.instance_ids",
+        "DocumentName": "BqDumpUpload",
+        "Parameters": {
+          "BqProject.$": "$.bq_project",
+          "BqDataset.$": "$.bq_dataset",
+          "BqTable.$": "$.bq_table",
+          "MonthId.$": "$$.Map.Item.Value",
+          "S3Bucket.$": "$.s3_bucket",
+          "S3Prefix.$": "$.s3_prefix"
+        }
+      },
+      "Iterator": {
+        "StartAt": "RunSSM",
+        "States": {
+          "RunSSM": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+            "Parameters": {
+              "InstanceIds.$": "$.InstanceIds",
+              "DocumentName.$": "$.DocumentName",
+              "Parameters.$": "$.Parameters"
+            },
+            "ResultPath": "$.command",
+            "Next": "WaitCommand"
+          },
+          "WaitCommand": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+            "Parameters": {
+              "CommandId.$": "$.command.Command.CommandId",
+              "InstanceId.$": "$.InstanceIds[0]"
+            },
+            "Retry": [
+              { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 60, "BackoffRate": 1.2 }
+            ],
+            "ResultSelector": {
+              "Status.$": "$.Status",
+              "StandardOutputContent.$": "$.StandardOutputContent",
+              "StandardErrorContent.$": "$.StandardErrorContent"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultSelector": {
+        "month.$": "$$.Map.Item.Value",
+        "invocation.$": "$"
+      },
+      "Next": "ValidateAll"
+    },
+    "ValidateAll": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "validate-bq-export-results",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.validation",
+      "End": true
+    }
+  }
+}
