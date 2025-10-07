@@ -1,0 +1,25 @@
+schemaVersion: '2.2'
+description: Export one month from BigQuery to S3 (Parquet)
+parameters:
+  BqProject: { type: String }
+  BqDataset: { type: String }
+  BqTable:   { type: String }
+  MonthId:   { type: String }
+  S3Bucket:  { type: String }
+  S3Prefix:  { type: String }
+mainSteps:
+  - action: aws:runShellScript
+    name: ExportOneMonth
+    inputs:
+      runCommand:
+        - |
+          set -euo pipefail
+          export BQ_PROJECT="{{ BqProject }}"
+          export BQ_DATASET="{{ BqDataset }}"
+          export BQ_TABLE="{{ BqTable }}"
+          export MONTH_ID="{{ MonthId }}"
+          export S3_BUCKET="{{ S3Bucket }}"
+          export S3_PREFIX="{{ S3Prefix }}"
+          export TMPDIR="/mnt/ebs/tmp"
+          mkdir -p "$TMPDIR"
+          python3 /opt/bq/bq_month_dump.py
