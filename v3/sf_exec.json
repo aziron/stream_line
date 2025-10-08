@@ -1,0 +1,11 @@
+{
+  "InstanceId": "i-0123456789abcdef0",
+  "SsmDocumentName": "BqToS3-Parallel-ByMonth",
+  "GcpServiceAccountJson": "<<<secure JSON from Param Store or injected securely>>>",
+  "QueryTemplate": "SELECT * FROM `myproj.myds.mytable` WHERE MONTH_ID = {month_id}",
+  "BqLocation": "EU",
+  "S3Bucket": "my-export-bucket",
+  "S3PrefixBase": "DATA_SOURCE_2025_10_08",
+  "CloudWatchLogGroup": "/aws/ssm/bq-to-s3",
+  "WaitSeconds": 20
+}
