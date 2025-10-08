@@ -1,0 +1,227 @@
+{
+  "Comment": "Parallel BigQuery month pulls via SSM with progress monitoring",
+  "StartAt": "InitMonths",
+  "States": {
+    "InitMonths": {
+      "Type": "Pass",
+      "ResultPath": "$.months",
+      "Result": [
+        "202401",
+        "202402",
+        "202403",
+        "202404",
+        "202405",
+        "202406",
+        "202407",
+        "202408",
+        "202409",
+        "202410",
+        "202411",
+        "202412"
+      ],
+      "Next": "FanOut"
+    },
+    "FanOut": {
+      "Type": "Map",
+      "ItemsPath": "$.months",
+      "MaxConcurrency": 12,
+      "Parameters": {
+        "MonthId.$": "$$.Map.Item.Value",
+        "BaseQuery.$": "$.baseQuery",
+        "BqProject.$": "$.bqProject",
+        "BqLocation.$": "$.bqLocation",
+        "S3Bucket.$": "$.s3Bucket",
+        "S3Prefix.$": "$.s3Prefix",
+        "InstanceIds.$": "$.instanceIds",
+        "ExecutionId.$": "$$.Execution.Id",
+        "ProgressS3.$": "States.Format('s3://{}/runs/{}/month_id={}.json', $.s3Bucket, $$.Execution.Id, $$.Map.Item.Value)"
+      },
+      "Iterator": {
+        "StartAt": "SendSSM",
+        "States": {
+          "SendSSM": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+            "Parameters": {
+              "InstanceIds.$": "$.InstanceIds",
+              "DocumentName": "BigQueryPullToS3",
+              "Comment.$": "$.ExecutionId",
+              "CloudWatchOutputConfig": {
+                "CloudWatchOutputEnabled": true
+              },
+              "Parameters": {
+                "MonthId": [
+                  "{{MonthId}}"
+                ],
+                "BaseQuery": [
+                  "{{BaseQuery}}"
+                ],
+                "BqProject": [
+                  "{{BqProject}}"
+                ],
+                "BqLocation": [
+                  "{{BqLocation}}"
+                ],
+                "S3Bucket": [
+                  "{{S3Bucket}}"
+                ],
+                "S3Prefix": [
+                  "{{S3Prefix}}"
+                ],
+                "ExecutionId": [
+                  "{{ExecutionId}}"
+                ],
+                "ProgressS3": [
+                  "{{ProgressS3}}"
+                ]
+              }
+            },
+            "ResultPath": "$.ssm",
+            "Next": "Wait5",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "ThrottlingException",
+                  "ServiceUnavailableException",
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 5,
+                "BackoffRate": 2.0,
+                "MaxAttempts": 6
+              }
+            ]
+          },
+          "Wait5": {
+            "Type": "Wait",
+            "Seconds": 5,
+            "Next": "PollInvocation"
+          },
+          "PollInvocation": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+            "Parameters": {
+              "CommandId.$": "$.ssm.Command.CommandId",
+              "InstanceId.$": "$.InstanceIds[0]"
+            },
+            "ResultPath": "$.poll",
+            "Next": "ParseProgress",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "ThrottlingException",
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 5,
+                "BackoffRate": 2.0,
+                "MaxAttempts": 6
+              }
+            ]
+          },
+          "ParseProgress": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "parse-progress-lines",
+              "Payload": {
+                "stdout.$": "$.poll.StandardOutputContent",
+                "monthId.$": "$.MonthId",
+                "executionId.$": "$.ExecutionId"
+              }
+            },
+            "ResultSelector": {
+              "parsed.$": "$.Payload"
+            },
+            "ResultPath": "$.progress",
+            "Next": "CheckStatus"
+          },
+          "CheckStatus": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.poll.Status",
+                "StringEquals": "InProgress",
+                "Next": "Wait5"
+              },
+              {
+                "Variable": "$.poll.Status",
+                "StringEquals": "Pending",
+                "Next": "Wait5"
+              },
+              {
+                "Variable": "$.poll.Status",
+                "StringEquals": "Delayed",
+                "Next": "Wait5"
+              }
+            ],
+            "Default": "Succeeded?"
+          },
+          "Succeeded?": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.poll.Status",
+                "StringEquals": "Success",
+                "Next": "DoneItem"
+              }
+            ],
+            "Default": "FailItem"
+          },
+          "DoneItem": {
+            "Type": "Pass",
+            "Parameters": {
+              "monthId.$": "$.MonthId",
+              "status.$": "$.poll.Status",
+              "ssmExitCode.$": "$.poll.ResponseCode",
+              "stdoutSize.$": "$.poll.StandardOutputUrl",
+              "stderrSize.$": "$.poll.StandardErrorUrl",
+              "lastProgress.$": "$.progress.parsed"
+            },
+            "ResultPath": "$.result",
+            "End": true
+          },
+          "FailItem": {
+            "Type": "Fail",
+            "Error": "SSMCommandFailed",
+            "Cause.$": "States.Format('SSM command failed for month {} with status {}', $.MonthId, $.poll.Status)"
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyFailure"
+        }
+      ],
+      "Next": "ValidateAll"
+    },
+    "ValidateAll": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "validate-month-manifests",
+        "Payload": {
+          "bucket.$": "$.s3Bucket",
+          "prefix.$": "$.s3Prefix",
+          "months.$": "$.months"
+        }
+      },
+      "ResultSelector": {
+        "validation.$": "$.Payload"
+      },
+      "ResultPath": "$.validation",
+      "End": true
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:REGION:ACCOUNT_ID:bq-pull-failures",
+        "Message.$": "States.JsonToString($)"
+      },
+      "End": true
+    }
+  }
+}
