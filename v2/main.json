@@ -1,0 +1,8 @@
+{
+  "baseQuery": "SELECT colA, colB, MONTH_ID FROM `project.dataset.table` WHERE TRUE",
+  "s3Bucket": "your-bucket",
+  "s3Prefix": "data/your_dataset/your_table",
+  "bqProject": "project",
+  "bqLocation": "EU",
+  "instanceIds": ["i-xxxxxxxxxxxxxxxxx"]
+}
