@@ -1,0 +1,72 @@
+{
+  "Comment": "Run BQ->S3 in 12 parallel chunks, show progress via SSM logs, then terminate EC2",
+  "QueryLanguage": "JSONata",
+  "StartAt": "StartSSMCommand",
+  "States": {
+    "StartSSMCommand": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Arguments": {
+        "InstanceIds": ["{% $.InstanceId %}"],
+        "DocumentName": "{% $.SsmDocumentName %}",
+        "Parameters": {
+          "GcpServiceAccountJson": ["{% $.GcpServiceAccountJson %}"],
+          "QueryTemplate": ["{% $.QueryTemplate %}"],
+          "BqLocation": ["{% $.BqLocation %}"],
+          "S3Bucket": ["{% $.S3Bucket %}"],
+          "S3PrefixBase": ["{% $.S3PrefixBase %}"]
+        },
+        "CloudWatchOutputConfig": {
+          "CloudWatchLogGroupName": "{% $.CloudWatchLogGroup ? $.CloudWatchLogGroup : '/aws/ssm/bq-to-s3' %}",
+          "CloudWatchOutputEnabled": true
+        }
+      },
+      "Output": "{% { 'CommandId': $states.result.Command.CommandId, 'InstanceId': $.InstanceId, 'CloudWatchLogGroup': $.CloudWatchLogGroup } %}",
+      "Next": "WaitBeforePoll"
+    },
+    "WaitBeforePoll": {
+      "Type": "Wait",
+      "SecondsPath": "{% $.WaitSeconds ? $.WaitSeconds : 20 %}",
+      "Next": "PollCommandStatus"
+    },
+    "PollCommandStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Arguments": {
+        "CommandId": "{% $.CommandId %}",
+        "InstanceId": "{% $.InstanceId %}"
+      },
+      "Output": "{% $states.result %}",
+      "Next": "StatusChoice",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "{% $ %}",
+          "Next": "WaitBeforePoll"
+        }
+      ]
+    },
+    "StatusChoice": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "{% $.Status %}", "StringEquals": "InProgress", "Next": "WaitBeforePoll" },
+        { "Variable": "{% $.Status %}", "StringEquals": "Pending", "Next": "WaitBeforePoll" },
+        { "Variable": "{% $.Status %}", "StringEquals": "Success", "Next": "TerminateInstance" }
+      ],
+      "Default": "FailSSM"
+    },
+    "TerminateInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ec2:terminateInstances",
+      "Arguments": {
+        "InstanceIds": ["{% $.InstanceId %}"]
+      },
+      "End": true
+    },
+    "FailSSM": {
+      "Type": "Fail",
+      "Error": "SSMCommandFailed",
+      "Cause": "{% 'Command execution failed with status: ' & $.Status %}"
+    }
+  }
+}
