@@ -1,0 +1,10 @@
+"Parameters": {
+  "MonthId.$": "States.Array($.MonthId)",
+  "BaseQuery.$": "States.Array($.BaseQuery)",
+  "BqProject.$": "States.Array($.BqProject)",
+  "BqLocation.$": "States.Array($.BqLocation)",
+  "S3Bucket.$": "States.Array($.S3Bucket)",
+  "S3Prefix.$": "States.Array($.S3Prefix)",
+  "ExecutionId.$": "States.Array($.ExecutionId)",
+  "ProgressS3.$": "States.Array($.ProgressS3)"
+}
