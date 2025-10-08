@@ -1,8 +1,8 @@
 {
-  "baseQuery": "SELECT colA, colB, MONTH_ID FROM `project.dataset.table` WHERE TRUE",
-  "s3Bucket": "your-bucket",
-  "s3Prefix": "data/your_dataset/your_table",
-  "bqProject": "project",
+  "baseQuery": "SELECT colA, colB, MONTH_ID FROM `my_gcp_project.my_dataset.my_table`",
+  "bqProject": "my_gcp_project",
   "bqLocation": "EU",
-  "instanceIds": ["i-xxxxxxxxxxxxxxxxx"]
+  "s3Bucket": "my-export-bucket",
+  "s3Prefix": "data/my_dataset/my_table",
+  "instanceIds": ["i-0123456789abcdef0"]
 }
