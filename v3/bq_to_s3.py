@@ -13,6 +13,19 @@ import boto3
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
+import tempfile
+import gzip
+from boto3.s3.transfer import TransferConfig
+
+# add/replace args
+parser.add_argument("--multipart-chunk-mib", type=int, default=64,
+                    help="S3 multipart chunk size in MiB (64–128 recommended for large files)")
+parser.add_argument("--multipart-max-concurrency", type=int, default=8,
+                    help="Concurrent multipart threads per upload")
+parser.add_argument("--gzip", action="store_true",
+                    help="Write .csv.gz instead of .csv (recommended for 2GB chunks)")
+
+
 # ---------- Arguments ----------
 parser = argparse.ArgumentParser(description="Parallel BigQuery to S3 exporter by MONTH_ID (1..12)")
 parser.add_argument("--gcp-sa-json-path", required=True, help="Path to GCP service account JSON on disk")
@@ -42,6 +55,14 @@ completed_parts = 0
 completed_lock = threading.Lock()
 stop_progress = threading.Event()
 
+transfer_cfg = TransferConfig(
+    multipart_threshold=8*1024*1024,   # trigger multipart above 8 MiB
+    multipart_chunksize=args.multipart_chunk_mib * 1024 * 1024,
+    max_concurrency=args.multipart_max_concurrency,
+    use_threads=True
+)
+
+
 def percent_done():
     with completed_lock:
         return int((completed_parts / TOTAL_PARTS) * 100)
@@ -54,42 +75,78 @@ def progress_reporter():
 
 def stream_query_to_csv_s3(month_id: int):
     """
-    Execute the query for one month_id, stream results to CSV in memory and upload to S3.
-    Retries on transient failures.
+    Execute query for one month_id, stream rows to a temp file (csv or csv.gz),
+    then multipart-upload to S3. Retries on transient failures.
     """
-    key = f"{args.s3_prefix}_part_{month_id:02d}.csv"
+    ext = ".csv.gz" if args.gzip else ".csv"
+    key = f"{args.s3_prefix}_part_{month_id:02d}{ext}"
     sql = args.query_template.format(month_id=month_id)
 
     for attempt in range(1, args.retries + 1):
+        tmp_path = None
         try:
+            # Run query
             job = bq_client.query(sql)
-            # Fetch schema early
-            result_iter = job.result(page_size=50000)
+            result_iter = job.result(page_size=200_000)  # large pages → fewer API calls
             schema = [field.name for field in result_iter.schema]
 
-            # Stream rows to CSV in memory (use SpooledTemporaryFile if you expect huge outputs)
-            buf = io.StringIO()
-            writer = csv.writer(buf, lineterminator="\n")
-            writer.writerow(schema)
-            for row in result_iter:
-                writer.writerow([row.get(field) for field in schema])
+            # Create temp file on disk
+            with tempfile.NamedTemporaryFile(prefix=f"bq_m{month_id:02d}_", suffix=ext, delete=False) as tmp:
+                tmp_path = tmp.name
 
-            # Upload to S3 with managed transfer
-            data_bytes = buf.getvalue().encode("utf-8")
-            s3.upload_fileobj(Fileobj=io.BytesIO(data_bytes), Bucket=args.s3_bucket, Key=key)
-            print(f"month_id={month_id} -> uploaded s3://{args.s3_bucket}/{key} (rows including header)", flush=True)
+            # Stream rows into the temp file (optionally gzip)
+            if args.gzip:
+                f_open = lambda p: gzip.open(p, mode="wt", newline="", compresslevel=6)
+            else:
+                f_open = lambda p: open(p, mode="w", newline="")
 
+            with f_open(tmp_path) as fh:
+                writer = csv.writer(fh, lineterminator="\n")
+                writer.writerow(schema)
+                # Iterate page by page to keep memory flat
+                for page in result_iter.pages:
+                    for row in page:
+                        writer.writerow([row.get(col) for col in schema])
+
+            # Multipart upload to S3
+            s3.upload_file(
+                Filename=tmp_path,
+                Bucket=args.s3_bucket,
+                Key=key,
+                Config=transfer_cfg
+            )
+
+            # Verify non-zero object size
+            head = s3.head_object(Bucket=args.s3_bucket, Key=key)
+            if head.get("ContentLength", 0) == 0:
+                raise RuntimeError("Uploaded object has zero size")
+
+            print(f"month_id={month_id} -> uploaded s3://{args.s3_bucket}/{key} size={head['ContentLength']}", flush=True)
+
+            # Mark progress
             with completed_lock:
                 global completed_parts
                 completed_parts += 1
+
+            # Cleanup temp file
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
             return key
 
         except Exception as e:
             print(f"ERROR month_id={month_id} attempt={attempt}/{args.retries}: {e}", file=sys.stderr, flush=True)
+            # Cleanup partial temp
+            if tmp_path and os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except Exception: pass
             if attempt < args.retries:
                 time.sleep(args.retry_backoff_seconds)
             else:
                 raise
+
 
 def verify_all_parts(keys):
     # Ensure all 12 keys exist with nonzero size
