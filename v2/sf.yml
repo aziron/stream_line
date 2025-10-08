@@ -1,0 +1,88 @@
+Comment: "Parallel BigQuery month pulls via SSM"
+StartAt: InitMonths
+States:
+  InitMonths:
+    Type: Pass
+    ResultPath: $.months
+    Result:
+      - "202401" - "202402" - "202403" - "202404" - "202405" - "202406"
+      - "202407" - "202408" - "202409" - "202410" - "202411" - "202412"
+    Next: FanOut
+
+  FanOut:
+    Type: Map
+    ItemsPath: $.months
+    MaxConcurrency: 12
+    Parameters:
+      MonthId.$: "$$.Map.Item.Value"
+      BaseQuery.$: $.baseQuery         # passed in when you start the execution
+      S3Bucket.$: $.s3Bucket
+      S3Prefix.$: $.s3Prefix
+      BqProject.$: $.bqProject
+      BqLocation.$: $.bqLocation
+      InstanceIds.$: $.instanceIds     # (optional) or use a tag-based target in SSM
+      ExecutionId.$: "$$.Execution.Id"
+    Iterator:
+      StartAt: RunSSM
+      States:
+        RunSSM:
+          Type: Task
+          Resource: arn:aws:states:::aws-sdk:ssm:sendCommand
+          Parameters:
+            InstanceIds.$: $.InstanceIds
+            DocumentName: "BigQueryPullToS3"
+            Comment.$: $.ExecutionId
+            Parameters:
+              MonthId:
+                - "{{MonthId}}"
+              BaseQuery:
+                - "{{BaseQuery}}"
+              S3Bucket:
+                - "{{S3Bucket}}"
+              S3Prefix:
+                - "{{S3Prefix}}"
+              BqProject:
+                - "{{BqProject}}"
+              BqLocation:
+                - "{{BqLocation}}"
+              ExecutionId:
+                - "{{ExecutionId}}"
+          ResultPath: $.ssm
+          Next: WaitAndPoll
+
+        WaitAndPoll:
+          Type: Task
+          Resource: arn:aws:states:::aws-sdk:ssm:getCommandInvocation
+          Parameters:
+            CommandId.$: $.ssm.Command.CommandId
+            InstanceId.$: $.InstanceIds[0]
+          Retry:
+            - ErrorEquals: ["ThrottlingException","ServiceUnavailable","States.TaskFailed"]
+              IntervalSeconds: 5
+              BackoffRate: 2.0
+              MaxAttempts: 6
+          End: true
+    Catch:
+      - ErrorEquals: ["States.ALL"]
+        ResultPath: $.error
+        Next: NotifyFailure
+    Next: ValidateAll
+
+  ValidateAll:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      FunctionName: "validate-month-manifests"   # (tiny Lambda, see below)
+      Payload:
+        S3Bucket.$: $.s3Bucket
+        S3Prefix.$: $.s3Prefix
+        Months.$: $.months
+    End: true
+
+  NotifyFailure:
+    Type: Task
+    Resource: arn:aws:states:::sns:publish
+    Parameters:
+      TopicArn: arn:aws:sns:...:bq-pull-failures
+      Message.$: $.error
+    End: true
